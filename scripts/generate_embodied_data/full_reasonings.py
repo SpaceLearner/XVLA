@@ -2,175 +2,106 @@ import json
 import os
 import re
 import time
+import base64
+from PIL import Image
+import numpy as np
+from collections import defaultdict
+import cv2
 
-import google.generativeai as genai
-from google.api_core.exceptions import ResourceExhausted
+from openai import AzureOpenAI
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from scripts.generate_embodied_data.primitive_movements import get_move_primitives_episode
+from scripts.generate_embodied_data.gripper_positions import get_gripper_pos_raw
 
 
-class Gemini:
+def encode_image_to_base64(image_array):
+    """将numpy数组转换为base64字符串"""
+    image = Image.fromarray(image_array)
+    import io
+    buffered = io.BytesIO()
+    image.save(buffered, format="PNG")
+    return base64.b64encode(buffered.getvalue()).decode('utf-8')
+
+
+class GPT4:
     def __init__(self):
-        api_key = "PUT_KEY_HERE"
-        genai.configure(api_key=api_key)
-
-        self.model = genai.GenerativeModel("gemini-1.5-flash")
-
-    def safe_call(self, f):
-        while True:
-            try:
-                res = f()
-                return res
-            except ResourceExhausted:
-                time.sleep(5)
-
-    def generate(self, prompt):
-        chat = self.safe_call(lambda: self.model.start_chat(history=[]))
-        response = self.safe_call(lambda: chat.send_message(prompt).text)
-
-        for i in range(8):
-            if "FINISHED" in response:
-                print(f"n_retries: {i}")
-                return response
-
-            response = response + self.safe_call(lambda: chat.send_message("Truncated, please continue.").text)
-
-        print(f"n_retries: {iter}")
-
-        return None
-
-
-def build_prompt(features, language_instruction, caption=None, list_only_moves=False):
-    structured_features = "{\n"
-
-    keys = list(features.keys())
-
-    for i in range(len(features[keys[0]])):
-        if list_only_moves:
-            structured_features = structured_features + f'    {i}: "{features["move_primitive"][i]}"\n'
-        else:
-            structured_features = structured_features + f'    {i}: {"{"}\n'
-
-            for key in keys:
-                feature_value = features[key][i]
-                if isinstance(feature_value, str):
-                    feature_value = f'"{feature_value}"'
-
-                structured_features = structured_features + f'        "{key}": {feature_value},\n'
-
-            structured_features = structured_features + "    },\n"
-
-    structured_features = structured_features + "}"
-
-    if list_only_moves:
-        features_desc = (
-            "Each entry in that dictionary corresponds to a single step on the "
-            "trajectory and describes the move that is about to be executed."
-        )
-    else:
-        features_desc = (
-            "Each entry in that dictionary corresponds to a single step on "
-            "the trajectory. The provided features are the following:\n"
-            "\n"
-            '- "state_3d" are the current 3d coordinates of the robotic arm end effector; '
-            "moving forward increases the first coordinate; moving left increases the second "
-            "coordinate; moving up increases the third coordinate,\n"
-            '- "move_primitive" describes the move that is about to be executed,\n'
-            '- "gripper_position" denotes the location of the gripper in the 256x256 image observation'
+        self.client = AzureOpenAI(
+            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+            api_version=os.getenv("AZURE_API_VERSION"),
+            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
         )
 
-    if caption is None:
-        caption = ""
-    else:
-        caption = f"""## Scene description
+    @retry(wait=wait_exponential(min=1, max=5), stop=stop_after_attempt(6))
+    def generate(self, prompt, images=None):
+        try:
+            messages = [{"role": "user", "content": []}]
+            
+            # 如果有图片，添加所有图片
+            if images is not None:
+                for image in images:
+                    base64_image = encode_image_to_base64(image)
+                    messages[0]["content"].append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{base64_image}"
+                        }
+                    })
+            
+            # 添加文本提示
+            messages[0]["content"].append({
+                "type": "text",
+                "text": prompt
+            })
 
-The robot is operating in the following environment. {caption}
-
-"""
-
-    break_line = ""  # for line formatting
-
-    return f"""# Annotate the training trajectory with reasoning
-
-## Specification of the experimental setup
-
-You're an expert reinforcement learning researcher. You've trained an optimal policy for controlling a robotic arm. The
-robot successfully completed a task specified by the instruction: "{language_instruction}". For that purpose, the
-robotic arm executed a sequence of actions. Consecutive moves that were executed are the following:
-
-
-```python
-trajectory_features = {structured_features}
-```
-
-{features_desc}
-
-{caption}## Your objective
-
-I want you to annotate the given trajectory with reasoning. That is, for each step, I need to know not only {
-break_line}which action should be chosen, but importantly what reasoning justifies that action choice. I want you to {
-break_line}be descriptive and include all the relevant information available. The reasoning should include the task {
-break_line}to complete, the remaining high-level steps, the high-level movements that should be executed and why they {
-break_line}are required, the premises that allow inferring the direction of each move, including the locations of {
-break_line}relevant objects, possible obstacles or difficulties to avoid, and any other relevant justification.
-
-### Begin by describing the task
-
-Start by giving an overview of the task. Make it more comprehensive than the simple instruction. Include the activity, {
-break_line}the objects the robotic arm interacts with, and their relative locations in the environment. Then, describe {
-break_line}the high-level movements that were most likely executed, based on the task that was completed and the {
-break_line}primitive movements that were executed. Then, for each high-level movement write the interval of steps that {
-break_line}movement consists of. Also, for each high-level movement write a justification for why it should be {
-break_line}executed. Write an answer for this part using markdown and natural language. Be descriptive and highlight {
-break_line}all the relevant details, but ensure that your description is consistent with the trajectory that was {
-break_line}executed, specified by the features listed above in the `trajectory_features` dictionary.
-
-### List the reasonings for each step
-
-Finally, for each step describe the reasoning that allows to determine the correct action. For each step describe the {
-break_line}remaining part of the objective, the current progress, the objects that are still relevant for determining {
-break_line}the plan, and the plan for the next steps, based on the available features. Start the reasoning from a high {
-break_line}level and gradually add finer features. I need you to be descriptive and very precise. Ensure that the {
-break_line}reasoning is consistent with the task and the executed trajectory. Write the answer for this part as a {
-break_line}Python-executable dictionary. For every step in the initial trajectory there should be exactly one separate {
-break_line}item of the form <step id>:<reasoning>. Do not group the answers. The final dictionary should have exactly {
-break_line}the same set of integer keys as the dictionary of features provided in the `trajectory_features` dictionary {
-break_line}above. The reasoning should be a single string that describes the reasoning in natural language and {
-break_line}includes all the required features.
-
-Each reasoning string should have the following form:
-- Describe the full task that remains to be completed (but only describe what remains), and place it inside a {
-break_line}tag <task>.
-- Describe the complete high-level plan for completing the remaining task (the list of remaining high-level steps), {
-break_line}and place it inside a tag <plan>.
-- Describe the high-level step that should be executed now (chosen from the list of high-level steps), and place it {
-break_line}inside a tag <subtask>.
-- Describe why the chosen high-level step should be executed now, which features of the current environment influence {
-break_line}that decision, and how it should be done. Place it within a tag <subtask_reason>.
-- Describe the current primitive movement of the arm that needs to be executed, and place it inside a tag <move>.
-- Describe why the chosen movement should be executed now and which features of the current environment influence that {
-break_line}decision. Place it inside a tag <move_reason>.
-
-## Task summary
-
-Here is a breakdown of what needs to be done:
-
-- Describe the task.
-- Describe the high-level movements that were executed, based on the completed task and the listed features.
-- Describe the plan for the solution that allowed the robot to complete the task successfully.
-- For each step on the trajectory, describe the reasoning that leads to determining the correct action. The reasoning {
-break_line}should be descriptive and precise. You should provide exactly one reasoning string for each step on the {
-break_line}trajectory specified by `trajectory_features`.
-- At the very end of the response, write a single label FINISHED to indicate that the answer is complete."""
-
+            response = self.client.chat.completions.create(
+                model=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+                messages=messages,
+                temperature=0.1,
+                max_tokens=10000,
+            )
+            return response.choices[0].message.content
+            
+        except Exception as e:
+            print(f"Error during API call: {e}")
+            raise
 
 def find_task_occurrences(input_string, tags):
-    pattern = r"(\d+):"
-    for tag in tags:
-        pattern = pattern + r"\s*<" + tag + r">([^<]*)<\/" + tag + ">"
-
-    matches = re.findall(pattern, input_string)
-    return matches
+    """
+    匹配每一步的reasoning，允许标签之间有空格
+    """
+    
+    # 首先尝试提取所有的步骤
+    step_pattern = r'(\d+):\s*"(.*?)"(?=,|\s*})'
+    steps = re.findall(step_pattern, input_string, re.DOTALL)
+    
+    print(f"\nFound {len(steps)} potential steps")
+    if steps:
+        print("First step:", steps[0][0], "content preview:", steps[0][1][:100])
+    
+    cleaned_matches = []
+    for step_num, step_content in steps:
+        # 为每个标签构建单独的模式
+        step_data = [step_num]
+        for tag in tags:
+            pattern = f'<{tag}>(.*?)</{tag}>'
+            match = re.search(pattern, step_content, re.DOTALL)
+            if match:
+                step_data.append(match.group(1).strip())
+            else:
+                print(f"\nMissing tag {tag} in step {step_num}")
+                print("Step content:", step_content)
+                break
+        
+        if len(step_data) == len(tags) + 1:  # +1 for step number
+            cleaned_matches.append(tuple(step_data))
+    
+    print(f"\nSuccessfully matched {len(cleaned_matches)} complete steps")
+    if cleaned_matches:
+        print("First complete match:", cleaned_matches[0])
+    
+    return cleaned_matches
 
 
 def extract_reasoning_dict(reasoning_output, tags=("task", "plan", "subtask", "subtask_reason", "move", "move_reason")):
@@ -179,77 +110,393 @@ def extract_reasoning_dict(reasoning_output, tags=("task", "plan", "subtask", "s
 
     trajectory = dict()
 
-    matches = find_task_occurrences(reasoning_output, tags)
+    try:
+        # 清理输入字符串，移除可能的Python字典格式
+        cleaned_output = reasoning_output
+        if "FINISHED" in cleaned_output:
+            cleaned_output = cleaned_output.split("FINISHED")[0]
+        
+        # 尝试找到字典的开始和结束
+        dict_start = cleaned_output.find("{")
+        dict_end = cleaned_output.rfind("}")
+        if dict_start != -1 and dict_end != -1:
+            cleaned_output = cleaned_output[dict_start:dict_end+1]
+        
+        print("\nCleaned output preview:")
+        print(cleaned_output)
+        
+        matches = find_task_occurrences(cleaned_output, tags)
+        
+        # 如果没有找到匹配项，返回None以触发重试
+        if not matches:
+            print("No matches found, returning None to trigger retry")
+            return None
+            
+        for match in matches:
+            step_num = int(match[0])
+            trajectory[step_num] = dict(zip(tags, match[1:]))
+            
+    except Exception as e:
+        print(f"Error extracting reasoning: {str(e)}")
+        print(f"Reasoning output: {reasoning_output}")
+        return None
+        
+    return trajectory[list(sorted(trajectory.keys(), key=int))[0]]
 
-    for match in matches:
-        trajectory[int(match[0])] = dict(zip(tags, match[1:]))
 
-    return trajectory
-
-
-def get_reasoning_dict(features, metadata, lm):
+def get_reasoning_dict(features, metadata, lm, images):
+    """基于轨迹分析生成reasoning"""
     language_instruction = metadata["language_instruction"]
-    caption = metadata["caption"] if "caption" in metadata.keys() else None
+    total_steps = len(features["move_primitive"])
+    episode_id = metadata["episode_id"]
+    
+    # 创建图片保存目录
+    image_dir = os.path.join("data/reasonings/images", f"episode_{episode_id}")
+    os.makedirs(image_dir, exist_ok=True)
+    
+    # 分析轨迹模式
+    action_groups = analyze_trajectory(features)
+    print(f"Found {len(action_groups)} action groups")
+    
+    # 存储所有步骤的reasoning
+    all_reasonings = {}
+    group_subtasks = []  # 存储每个组的subtask
+    
+    # 为每个组单独生成reasoning
+    for group_idx, group in enumerate(action_groups):
+        print(f"\nProcessing group {group_idx + 1}/{len(action_groups)}:")
+        print(f"Step range: {group['start_idx']}-{group['end_idx']}")
+        print(f"Action type: {group['move_type']}")
+        
+        # 获取该组的起始和结束图片
+        start_image = images[group['start_idx']]
+        end_image = images[group['end_idx']]
+        
+        # 保存图片
+        start_image_path = os.path.join(image_dir, f"group_{group_idx}_start.png")
+        end_image_path = os.path.join(image_dir, f"group_{group_idx}_end.png")
+        
+        Image.fromarray(start_image).save(start_image_path)
+        Image.fromarray(end_image).save(end_image_path)
+        
+        print(f"Saved group {group_idx} images to {image_dir}")
+        
+        # 构建之前组的reasoning描述
+        previous_groups = ""
+        for prev_idx in range(group_idx):
+            prev_group = action_groups[prev_idx]
+            prev_reasoning = all_reasonings.get(prev_group['start_idx'])
+            if prev_reasoning:
+                previous_groups += f"""Group {prev_idx + 1}:
+- Steps {prev_group['start_idx']}-{prev_group['end_idx']}
+- Action: {prev_group['move_type']}
+- Subtask: {prev_reasoning.get('subtask', 'Unknown')}
+- Reasoning: {prev_reasoning.get('subtask_reason', 'Unknown')}
 
-    prompt = build_prompt(features, language_instruction, caption=caption, list_only_moves=True)
-    print("metadata:", metadata, "\nprompt:", prompt)
+"""
+        
+        # 构建该组的prompt
+        prompt = f"""# Generate reasoning for robot actions
 
-    reasoning_output = lm.generate(prompt)
+Task instruction: "{language_instruction}"
 
-    print("reasoning:", reasoning_output)
+{previous_groups if previous_groups else ""}## Current Action Group (Group {group_idx + 1}/{len(action_groups)})
+- Step range: {group['start_idx']} to {group['end_idx']}
+- Action type: {group['move_type']}
+- Duration: {group['duration']} steps
+- State change: {[round(x, 3) for x in group['state_change']]}
 
-    return extract_reasoning_dict(reasoning_output)
+The first image shows the state at the start of this action group.
+The second image shows the state at the end of this action group.
+
+## Required Output
+Generate reasoning for the action group with the following tags:
+<task>Remaining task description</task>
+<plan>List of remaining high-level steps</plan>
+<subtask>Current high-level step</subtask>
+<subtask_reason>Why execute this step now, considering previous actions</subtask_reason>
+<move>{group['move_type']}</move>
+<move_reason>Why execute this movement</move_reason>
+
+There is no need to repeat a subtask many times. Analyze the start and end state of the action group and analyze what remains to do and then generate the reasoning for the action group in the following format, with the first step of the action group:
+{{
+    {group['start_idx']}: "<task>...</task><plan>...</plan><subtask>...</subtask><subtask_reason>...</subtask_reason><move>...</move><move_reason>...</move_reason>",
+    ...
+}}
+
+FINISHED"""
+        
+        # 最多尝试3次生成reasoning
+        max_attempts = 3
+        group_reasoning = None
+        
+        for attempt in range(max_attempts):
+            # 生成该组的reasoning
+            reasoning_output = lm.generate(prompt, [start_image, end_image])
+            group_reasoning = extract_reasoning_dict(reasoning_output)
+            
+            if group_reasoning is not None:
+                print(f"Successfully generated reasoning on attempt {attempt + 1}")
+                break
+            else:
+                print(f"Failed to generate valid reasoning on attempt {attempt + 1}, retrying...")
+        
+        if group_reasoning is None:
+            raise ValueError(f"Failed to generate valid reasoning for group {group_idx} after {max_attempts} attempts")
+        
+        group_subtasks.append(group_reasoning.get('subtask', 'Unknown'))
+        all_reasonings.update({group['start_idx']: group_reasoning})
+    
+    # 生成整体plan
+    # 构建action sequence字符串
+    action_sequence = ""
+    for idx, (group, subtask) in enumerate(zip(action_groups, group_subtasks)):
+        action_sequence += f"""Group {idx + 1}:
+- Steps {group['start_idx']}-{group['end_idx']}
+- Action: {group['move_type']}
+- Subtask: {subtask}
+"""
+    
+    full_sequence_prompt = f"""# Summarize the action sequence
+
+Task instruction: "{language_instruction}"
+
+## Action Groups Sequence
+{action_sequence}
+
+## Required Output
+Based on the sequence of actions and their subtasks, provide a ONE-SENTENCE summary that describes how these subtasks work together to accomplish the main task.
+Focus on the high-level flow of actions, not the details.
+
+Example format: "1. [first action], 2. [second action], ... 3. [last action]."
+"""
+    
+    # 生成整体plan
+    full_plan = lm.generate(full_sequence_prompt, [images[0], images[-1]])
+    print("\nOverall plan generated:", full_plan)
+    
+    # 使用整体plan更新每个组的reasoning
+    all_reasonings = propagate_reasoning(all_reasonings, action_groups)
+    
+    # 更新每个步骤的plan
+    for step in all_reasonings:
+        all_reasonings[step]['plan'] = full_plan
+            
+    # 最终验证
+    assert len(all_reasonings) == total_steps
+    
+    return all_reasonings
+
+def convert_to_serializable(obj):
+    """将对象转换为可JSON序列化的格式"""
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {key: convert_to_serializable(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_to_serializable(item) for item in obj]
+    else:
+        return obj
 
 
-def build_single_reasoning(episode_id, builder, lm, captions):
+def build_single_reasoning(episode_id, builder, lm):
     ds = builder.as_dataset(split=f"train[{episode_id}:{episode_id + 1}]")
-    episode = next(iter(ds))
+    
+    try:
+        episode = next(iter(ds))
+    except Exception as e:
+        print(f"Error getting episode from dataset: {str(e)}")
+        raise
 
+    # 获取steps
+    steps = list(episode["steps"])
+    # print(episode["episode_metadata"])
+    if not steps:
+        raise ValueError("No steps found in episode")
+
+    total_steps = len(steps)
+    
     ft = dict()
-
-    ft["state_3d"] = [list(step["observation"]["state"][:3].numpy()) for step in episode["steps"]]
-
+    # 确保转换为Python原生类型
+    ft["state_3d"] = [convert_to_serializable(step["observation"]["state"][:3].numpy()) for step in steps]
     move_primitives = get_move_primitives_episode(episode)
     ft["move_primitive"] = [move[0] for move in move_primitives]
+    
+    # 验证特征数量
+    assert len(ft["state_3d"]) == total_steps, f"state_3d长度 ({len(ft['state_3d'])}) 与步骤数 ({total_steps}) 不匹配"
+    assert len(ft["move_primitive"]) == total_steps, f"move_primitive长度 ({len(ft['move_primitive'])}) 与步骤数 ({total_steps}) 不匹配"
+
+    # import pdb; pdb.set_trace()
+
+    # 获取所有图片
+    images = [step["observation"]["image"].numpy() for step in steps]
+    language_instruction = str(steps[0]["language_instruction"].numpy().decode())
 
     mt = {
-        "episode_id": str(int(episode["episode_metadata"]["episode_id"].numpy())),
-        "file_path": str(episode["episode_metadata"]["file_path"].numpy())[2:-1],
-        "n_steps": len(episode["steps"]),
-        "language_instruction": str(next(iter(episode["steps"]))["language_instruction"].numpy().decode()),
+        "episode_id": str(episode_id),
+        "file_path": "episode_" + str(episode_id),
+        "n_steps": total_steps,
+        "language_instruction": language_instruction,
     }
 
-    mt["caption"] = captions[mt["file_path"]][mt["episode_id"]]["caption"]
-
-    reasoning = get_reasoning_dict(ft, mt, lm)
+    # 使用完整的图片序列生成reasoning
+    reasoning = get_reasoning_dict(ft, mt, lm, images)
+    
+    print(reasoning)
+    
+    # 验证reasoning数量
+    assert len(reasoning) == total_steps, \
+        f"Episode {episode_id}: reasoning数量 ({len(reasoning)}) 与步骤数 ({total_steps}) 不匹配"
+    
+    # 验证reasoning的步骤编号
+    assert set(reasoning.keys()) == set(range(total_steps)), \
+        f"Episode {episode_id}: reasoning的步骤编号与预期不匹配。缺失步骤: {set(range(total_steps)) - set(reasoning.keys())}"
+    
     entry = {"reasoning": reasoning, "features": ft, "metadata": mt}
-
-    return entry
+    return convert_to_serializable(entry)
 
 
 def generate_reasonings(builder, episode_ids, save_path="reasonings.json"):
     reasonings = dict()
-    lm = Gemini()
+    lm = GPT4()
 
     if os.path.exists(save_path):
         print(save_path, "existing, loading contents")
         with open(save_path, "r") as f:
             reasonings = json.load(f)
-
         print("loaded reasonings:", sum([len(v) for v in reasonings.values()]), "entries")
 
-    with open("captions.json", "r") as captions_file:
-        captions_dict = json.load(captions_file)
-
     for i in episode_ids:
-        entry = build_single_reasoning(i, builder, lm, captions_dict)
+        try:
+            entry = build_single_reasoning(i, builder, lm)
+            
+            file_path  = entry["metadata"]["file_path"]
+            episode_id = entry["metadata"]["episode_id"]
 
-        if entry["metadata"]["file_path"] in reasonings.keys():
-            reasonings[entry["metadata"]["file_path"]][entry["metadata"]["episode_id"]] = entry
-        else:
-            reasonings[entry["metadata"]["file_path"]] = {entry["metadata"]["episode_id"]: entry}
+            if file_path not in reasonings:
+                reasonings[file_path] = {}
+            
+            reasonings[file_path][episode_id] = entry
 
-        print("computed reasoning:", entry)
+            if (i + 1) % 1 == 0:
+                print(f"Saving intermediate results after episode {i}")
+                with open(save_path, "w") as out_f:
+                    json.dump(reasonings, out_f)
 
+        except Exception as e:
+            print(f"Error processing episode {i}: {str(e)}")
+            with open(save_path, "w") as out_f:
+                json.dump(convert_to_serializable(reasonings), out_f)  # 确保错误时也能保存
+            continue
+
+    # 最终保存
     with open(save_path, "w") as out_f:
-        json.dump(reasonings, out_f)
+        json.dump(convert_to_serializable(reasonings), out_f)
+
+
+def analyze_trajectory(features):
+    """分析轨迹，将相似的动作分组并识别模式"""
+    moves = features["move_primitive"]
+    states = features["state_3d"]
+    
+    # 初始化分组
+    action_groups = []
+    current_group = {
+        "start_idx": 0,
+        "end_idx": 0,
+        "moves": [moves[0]],
+        "states": [states[0]],
+        "move_type": moves[0]
+    }
+    
+    # 根据连续相同作进行分组
+    for i in range(1, len(moves)):
+        if moves[i] == current_group["move_type"]:
+            current_group["moves"].append(moves[i])
+            current_group["states"].append(states[i])
+            current_group["end_idx"] = i
+        else:
+            action_groups.append(current_group)
+            current_group = {
+                "start_idx": i,
+                "end_idx": i,
+                "moves": [moves[i]],
+                "states": [states[i]],
+                "move_type": moves[i]
+            }
+    
+    # 添加最后一组
+    action_groups.append(current_group)
+    
+    # 分析每组的特征
+    for group in action_groups:
+        # 计算状态变化
+        start_state = np.array(group["states"][0])
+        end_state = np.array(group["states"][-1])
+        state_change = end_state - start_state
+        
+        group.update({
+            "duration": len(group["moves"]),
+            "state_change": state_change.tolist(),
+            "step_indices": list(range(group["start_idx"], group["end_idx"] + 1))
+        })
+    
+    return action_groups
+
+def propagate_reasoning(raw_reasonings, action_groups):
+    """将reasoning传播到所有步骤，确保每个步骤都有对应的reasoning"""
+    complete_reasonings = {}
+    
+    # 计算总骤数
+    total_steps = max(group["end_idx"] for group in action_groups) + 1
+    
+    # 遍历每个动作组
+    for group in action_groups:
+        start_idx = group["start_idx"]
+        end_idx   = group["end_idx"]
+        
+        # 获取该组的模板reasoning
+        template = None
+        # 首先尝试使用组内第一步的reasoning作为模板
+        if start_idx in raw_reasonings:
+            template = raw_reasonings[start_idx]
+        else:
+            # 如果组内第一步没有reasoning，查找组内任何一个有reasoning的步骤
+            for step in range(start_idx, end_idx + 1):
+                if step in raw_reasonings:
+                    template = raw_reasonings[step]
+                    break
+        
+        if template is None:
+            raise ValueError(f"动作组 {start_idx}-{end_idx} 没有找到可用的reasoning模板")
+            
+        # 为组内的每一步设置reasoning
+        for step in range(start_idx, end_idx + 1):
+            if step in raw_reasonings:
+                # 如果该步骤已有reasoning，使用原有的
+                complete_reasonings[step] = raw_reasonings[step]
+            else:
+                # 否则使用模板
+                complete_reasonings[step] = template.copy()
+    
+    # 验证是否所有步骤都有reasoning
+    expected_steps = set(range(total_steps))
+    actual_steps = set(complete_reasonings.keys())
+    
+    # 验证步骤完整性
+    assert expected_steps == actual_steps, \
+        f"步骤不完整。缺失步骤: {expected_steps - actual_steps}, 多余步骤: {actual_steps - expected_steps}"
+    
+    # 验证步骤连续性
+    assert len(complete_reasonings) == total_steps, \
+        f"reasoning数量 ({len(complete_reasonings)}) 与总步骤数 ({total_steps}) 不匹配"
+    
+    return complete_reasonings
+
+if __name__ == "__main__":
+    client = GPT4()
+    client.generate("hello", None)

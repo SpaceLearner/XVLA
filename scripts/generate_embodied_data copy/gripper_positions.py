@@ -123,7 +123,7 @@ def get_gripper_pos(episode_id, frame, builder, plot=True):
 
 
 def get_gripper_pos_raw(img):
-    img = Image.fromarray(img)
+    img = Image.fromarray(img.numpy())
     predictions = get_bounding_boxes(img)
 
     if len(predictions) > 0:
