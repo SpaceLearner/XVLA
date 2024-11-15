@@ -5,7 +5,7 @@ import warnings
 import tensorflow_datasets as tfds
 from PIL import Image
 from tqdm import tqdm
-from utils import NumpyFloatValuesEncoder
+from .utils import NumpyFloatValuesEncoder
 from openai import AzureOpenAI
 from tenacity import retry, wait_exponential, stop_after_attempt
 import base64
@@ -74,6 +74,8 @@ dataset_builder = tfds.builder("libero_spatial_reasoning", data_dir="/home/admin
 ds = dataset_builder.as_dataset(split=f"train[{start}%:{end}%]")
 print("Done.")
 
+print(next(iter(ds)))
+
 # 初始化GPT4客户端
 lm = GPT4()
 
@@ -89,21 +91,26 @@ def create_user_prompt(lang_instruction):
     return user_prompt
 
 results_json = {}
-for episode in tqdm(ds):
+for episode in tqdm(iter(ds)):
     episode_id = episode["episode_metadata"]["episode_id"].numpy()
     file_path = episode["episode_metadata"]["file_path"].numpy().decode()
+    # print(next(episode["steps"]))
+    print(len(episode["steps"]))
     for step in episode["steps"]:
+        print(step)
         lang_instruction = step["language_instruction"].numpy().decode()
+        print(language_instruction)
         image = Image.fromarray(step["observation"]["image_0"].numpy())
-
+        print(image)
         user_prompt = create_user_prompt(lang_instruction)
         caption = lm.generate(user_prompt, [image])
         break
 
+    # print(episode_id)
     episode_json = {
-        "episode_id": int(episode_id.strip().split("_")[-1]),
-        "file_path": file_path,
-        "caption": caption,
+        "episode_id": int(episode_id.decode().strip().split("_")[-1]),
+        "file_path":  file_path,
+        "caption":    caption,
     }
 
     if file_path not in results_json.keys():
