@@ -25,4 +25,4 @@ print("Inserted", count, "trajectory descriptions into combined json")
 print("Saving to:", path_to_full_desc)
 
 with open(path_to_full_desc, "w") as f:
-    json.dump(full_json, path_to_full_desc)
+    json.dump(full_json, f)

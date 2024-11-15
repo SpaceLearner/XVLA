@@ -70,7 +70,7 @@ start = args.id * split_percents
 end = (args.id + 1) * split_percents
 
 # Load Bridge V2
-dataset_builder = tfds.builder("libero_spatial_reasoning", data_dir="/Users/gj/Documents/Projects/Embodied_Critic/data")
+dataset_builder = tfds.builder("libero_spatial", data_dir="/Users/gj/Documents/Projects/Embodied_Critic/data")
 ds = dataset_builder.as_dataset(split=f"train[{start}%:{end}%]")
 print("Done.")
 
@@ -89,12 +89,12 @@ def create_user_prompt(lang_instruction):
     return user_prompt
 
 results_json = {}
-for episode in tqdm(ds):
-    episode_id = episode["episode_metadata"]["episode_id"].numpy()
+for idx, episode in tqdm(enumerate(ds)):
+    episode_id = idx + 108 * args.id
     file_path = episode["episode_metadata"]["file_path"].numpy().decode()
     for step in episode["steps"]:
         lang_instruction = step["language_instruction"].numpy().decode()
-        image = Image.fromarray(step["observation"]["image_0"].numpy())
+        image = Image.fromarray(step["observation"]["image"].numpy())
 
         user_prompt = create_user_prompt(lang_instruction)
         caption = lm.generate(user_prompt, [image])
