@@ -7,7 +7,7 @@ import tensorflow_datasets as tfds
 import torch
 from PIL import Image
 from tqdm import tqdm
-from utils import NumpyFloatValuesEncoder
+from .utils import NumpyFloatValuesEncoder
 
 from prismatic import load
 
@@ -32,7 +32,7 @@ start = args.id * split_percents
 end = (args.id + 1) * split_percents
 
 # Load Bridge V2
-dataset_builder = tfds.builder("libero_spatial_reasoning", data_dir="/Users/gj/Documents/Projects/Embodied_Critic/data")
+dataset_builder = tfds.builder("libero_spatial_reasoning", data_dir="/home/admin/workspace/data/")
 ds = dataset_builder.as_dataset(split=f"train[{start}%:{end}%]")
 print("Done.")
 
@@ -81,7 +81,7 @@ for episode in tqdm(ds):
         break
 
     episode_json = {
-        "episode_id": int(episode_id),
+        "episode_id": int(episode_id.strip().split("_")[-1]),
         "file_path": file_path,
         "caption": caption,
     }
