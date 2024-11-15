@@ -2,30 +2,68 @@ import argparse
 import json
 import os
 import warnings
-
 import tensorflow_datasets as tfds
-import torch
 from PIL import Image
 from tqdm import tqdm
 from utils import NumpyFloatValuesEncoder
+from openai import AzureOpenAI
+from tenacity import retry, wait_exponential, stop_after_attempt
+import base64
+from io import BytesIO
 
-from prismatic import load
+class GPT4:
+    def __init__(self):
+        self.client = AzureOpenAI(
+            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+            api_version=os.getenv("AZURE_API_VERSION"),
+            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
+        )
+
+    @retry(wait=wait_exponential(min=1, max=5), stop=stop_after_attempt(6))
+    def generate(self, prompt, images=None):
+        try:
+            messages = [{"role": "user", "content": []}]
+            
+            # 如果有图片，添加所有图片
+            if images is not None:
+                for image in images:
+                    buffered = BytesIO()
+                    image.save(buffered, format="PNG")
+                    base64_image = base64.b64encode(buffered.getvalue()).decode('utf-8')
+                    messages[0]["content"].append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{base64_image}"
+                        }
+                    })
+            
+            # 添加文本提示
+            messages[0]["content"].append({
+                "type": "text",
+                "text": prompt
+            })
+
+            response = self.client.chat.completions.create(
+                model=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+                messages=messages,
+                temperature=0.1,
+                max_tokens=10000,
+            )
+            return response.choices[0].message.content
+            
+        except Exception as e:
+            print(f"Error during API call: {e}")
+            raise
 
 parser = argparse.ArgumentParser()
-
 parser.add_argument("--id", type=int)
-parser.add_argument("--gpu", type=int)
 parser.add_argument("--splits", default=4, type=int)
 parser.add_argument("--results-path", default="./")
 
 args = parser.parse_args()
 
-device = f"cuda:{args.gpu}"
-hf_token = "<TODO: Insert HF Token>"
-vlm_model_id = "prism-dinosiglip+7b"
-
 warnings.filterwarnings("ignore")
-
 
 split_percents = 100 // args.splits
 start = args.id * split_percents
@@ -36,24 +74,19 @@ dataset_builder = tfds.builder("libero_spatial_reasoning", data_dir="/Users/gj/D
 ds = dataset_builder.as_dataset(split=f"train[{start}%:{end}%]")
 print("Done.")
 
-# Load Prismatic VLM
-print(f"Loading Prismatic VLM ({vlm_model_id})...")
-vlm = load(vlm_model_id, hf_token=hf_token)
-vlm = vlm.to(device, dtype=torch.bfloat16)
+# 初始化GPT4客户端
+lm = GPT4()
 
 results_json_path = os.path.join(args.results_path, f"results_{args.id}.json")
 
-
 def create_user_prompt(lang_instruction):
     user_prompt = "Briefly describe the things in this scene and their spatial relations to each other."
-    # user_prompt = "Briefly describe the objects in this scene."]
     lang_instruction = lang_instruction.strip()
     if len(lang_instruction) > 0 and lang_instruction[-1] == ".":
         lang_instruction = lang_instruction[:-1]
     if len(lang_instruction) > 0 and " " in lang_instruction:
         user_prompt = f"The robot task is: '{lang_instruction}.' " + user_prompt
     return user_prompt
-
 
 results_json = {}
 for episode in tqdm(ds):
@@ -63,21 +96,8 @@ for episode in tqdm(ds):
         lang_instruction = step["language_instruction"].numpy().decode()
         image = Image.fromarray(step["observation"]["image_0"].numpy())
 
-        # user_prompt = "Describe the objects in this scene. Be specific."
         user_prompt = create_user_prompt(lang_instruction)
-        prompt_builder = vlm.get_prompt_builder()
-        prompt_builder.add_turn(role="human", message=user_prompt)
-        prompt_text = prompt_builder.get_prompt()
-
-        torch.manual_seed(0)
-        caption = vlm.generate(
-            image,
-            prompt_text,
-            do_sample=True,
-            temperature=0.4,
-            max_new_tokens=64,
-            min_length=1,
-        )
+        caption = lm.generate(user_prompt, [image])
         break
 
     episode_json = {
