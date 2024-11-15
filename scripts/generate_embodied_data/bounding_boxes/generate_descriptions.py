@@ -32,11 +32,9 @@ start = args.id * split_percents
 end = (args.id + 1) * split_percents
 
 # Load Bridge V2
-ds = tfds.load(
-    "bridge_orig",
-    data_dir="<TODO: Enter path to BridgeV2>",
-    split=f"train[{start}%:{end}%]",
-)
+dataset_builder = tfds.builder("libero_spatial_reasoning", data_dir="/Users/gj/Documents/Projects/Embodied_Critic/data")
+ds = dataset_builder.as_dataset(split=f"train[{start}%:{end}%]")
+print("Done.")
 
 # Load Prismatic VLM
 print(f"Loading Prismatic VLM ({vlm_model_id})...")

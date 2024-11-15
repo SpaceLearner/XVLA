@@ -29,7 +29,10 @@ split_percents = 100 // args.splits
 start = args.id * split_percents
 end = (args.id + 1) * split_percents
 
-ds = tfds.load("bridge_orig", data_dir=args.data_path, split=f"train[{start}%:{end}%]")
+# ds = tfds.load("bridge_orig", data_dir=args.data_path, split=f"train[{start}%:{end}%]")
+
+dataset_builder = tfds.builder("libero_spatial_reasoning", data_dir="/Users/gj/Documents/Projects/Embodied_Critic/data")
+ds = dataset_builder.as_dataset(split=f"train[{start}%:{end}%]")
 print("Done.")
 
 print("Loading Prismatic descriptions...")
