@@ -14,8 +14,8 @@ def main():
     # 设置环境变量
     
     # 设置数据集路径和名称
-    data_dir = "/Users/gj/Documents/Projects/Embodied_Critic/data"
-    dataset_name = "libero_spatial_no_noops"
+    data_dir = "/home/admin/workspace/data"
+    dataset_name = "libero_spatial_reasoning"
     
     # 加载数据集构建器
     dataset_builder = tfds.builder(dataset_name, data_dir=data_dir)
@@ -38,7 +38,7 @@ def main():
     output_dir = os.path.join(data_dir, "reasonings")
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, "reasonings.json")
-    
+    print(output_path)
     cur_episode = list(json.load(open(output_path, "r")).keys())
     cur_episode = max([int(i.strip().split("_")[-1]) for i in cur_episode])
     
@@ -46,8 +46,6 @@ def main():
     start_episode = cur_episode + 1
     end_episode = len(ds)
     episode_ids = range(start_episode, end_episode)
-    
-   
     
     try:
         # 生成reasonings

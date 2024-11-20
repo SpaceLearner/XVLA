@@ -12,8 +12,6 @@ from openai import AzureOpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from scripts.generate_embodied_data.primitive_movements import get_move_primitives_episode
-from scripts.generate_embodied_data.gripper_positions import get_gripper_pos_raw
-
 
 def encode_image_to_base64(image_array):
     """将numpy数组转换为base64字符串"""
@@ -150,10 +148,6 @@ def get_reasoning_dict(features, metadata, lm, images):
     total_steps = len(features["move_primitive"])
     episode_id = metadata["episode_id"]
     
-    # 创建图片保存目录
-    image_dir = os.path.join("data/reasonings/images", f"episode_{episode_id}")
-    os.makedirs(image_dir, exist_ok=True)
-    
     # 分析轨迹模式
     action_groups = analyze_trajectory(features)
     print(f"Found {len(action_groups)} action groups")
@@ -171,15 +165,6 @@ def get_reasoning_dict(features, metadata, lm, images):
         # 获取该组的起始和结束图片
         start_image = images[group['start_idx']]
         end_image = images[group['end_idx']]
-        
-        # 保存图片
-        start_image_path = os.path.join(image_dir, f"group_{group_idx}_start.png")
-        end_image_path = os.path.join(image_dir, f"group_{group_idx}_end.png")
-        
-        Image.fromarray(start_image).save(start_image_path)
-        Image.fromarray(end_image).save(end_image_path)
-        
-        print(f"Saved group {group_idx} images to {image_dir}")
         
         # 构建之前组的reasoning描述
         previous_groups = ""
@@ -338,15 +323,13 @@ def build_single_reasoning(episode_id, builder, lm):
 
     mt = {
         "episode_id": str(episode_id),
-        "file_path": "episode_" + str(episode_id),
+        "file_path": "episode_" + str(episode_id),  # episode["episode_metadata"]["file_path"].numpy().decode("utf-8"),
         "n_steps": total_steps,
         "language_instruction": language_instruction,
     }
 
     # 使用完整的图片序列生成reasoning
     reasoning = get_reasoning_dict(ft, mt, lm, images)
-    
-    print(reasoning)
     
     # 验证reasoning数量
     assert len(reasoning) == total_steps, \

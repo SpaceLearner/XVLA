@@ -5,7 +5,7 @@ import warnings
 import tensorflow_datasets as tfds
 from PIL import Image
 from tqdm import tqdm
-from utils import NumpyFloatValuesEncoder
+from .utils import NumpyFloatValuesEncoder
 from openai import AzureOpenAI
 from tenacity import retry, wait_exponential, stop_after_attempt
 import base64
@@ -70,9 +70,12 @@ start = args.id * split_percents
 end = (args.id + 1) * split_percents
 
 # Load Bridge V2
-dataset_builder = tfds.builder("libero_spatial", data_dir="/Users/gj/Documents/Projects/Embodied_Critic/data")
+dataset_builder = tfds.builder("libero_spatial_reasoning", data_dir="/home/admin/workspace/data/")
+
 ds = dataset_builder.as_dataset(split=f"train[{start}%:{end}%]")
 print("Done.")
+
+print(next(iter(ds)))
 
 # 初始化GPT4客户端
 lm = GPT4()
@@ -89,21 +92,27 @@ def create_user_prompt(lang_instruction):
     return user_prompt
 
 results_json = {}
+
 for idx, episode in tqdm(enumerate(ds)):
     episode_id = idx + 108 * args.id
-    file_path = episode["episode_metadata"]["file_path"].numpy().decode()
-    for step in episode["steps"]:
-        lang_instruction = step["language_instruction"].numpy().decode()
-        image = Image.fromarray(step["observation"]["image"].numpy())
 
+    file_path = episode["episode_metadata"]["file_path"].numpy().decode()
+    # print(next(episode["steps"]))
+    print(len(episode["steps"]))
+    for step in episode["steps"]:
+        print(step)
+        lang_instruction = step["language_instruction"].numpy().decode()
+
+        image = Image.fromarray(step["observation"]["image"].numpy())
         user_prompt = create_user_prompt(lang_instruction)
         caption = lm.generate(user_prompt, [image])
         break
 
+    # print(episode_id)
     episode_json = {
-        "episode_id": int(episode_id),
-        "file_path": file_path,
-        "caption": caption,
+        "episode_id": int(episode_id.decode().strip().split("_")[-1]),
+        "file_path":  file_path,
+        "caption":    caption,
     }
 
     if file_path not in results_json.keys():

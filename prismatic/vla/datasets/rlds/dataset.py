@@ -133,6 +133,7 @@ def make_dataset_from_rlds(
     if language_key is not None:
         REQUIRED_KEYS.add(language_key)
 
+    reasoning_dataset_path = os.path.join("/root", reasoning_dataset_path[2:])
     if os.path.isfile(reasoning_dataset_path):
         print(f"Loading from local checkpoint path `{reasoning_dataset_path}`.")
     else:
@@ -151,7 +152,8 @@ def make_dataset_from_rlds(
 
     def make_tf_dict(raw_dict):
         print("Building the reasoning dict...")
-        keys = []
+        
+        keys = [] 
         values = []
 
         def reasoning_dict_to_str(d):
@@ -208,10 +210,18 @@ def make_dataset_from_rlds(
 
         return tf.lookup.StaticHashTable(tf.lookup.KeyValueTensorInitializer(keys, values), default_value="")
 
+    # import pdb; pdb.set_trace()
+
     reasoning_dataset = make_tf_dict(reasoning_dataset)
+    
+    # import pdb; pdb.set_trace()
+    
+#     print(list(reasoning_dataset.keys())[0])
+    
 
     def restructure(traj):
         # apply a standardization function, if provided
+        
         if standardize_fn is not None:
             traj = standardize_fn(traj)
 
@@ -261,7 +271,7 @@ def make_dataset_from_rlds(
                 )
             task["language_instruction"] = traj.pop(language_key)
 
-        file_name = traj["traj_metadata"]["episode_metadata"]["file_path"][0]
+        file_name  = traj["traj_metadata"]["episode_metadata"]["file_path"][0]
         episode_id = traj["traj_metadata"]["episode_metadata"]["episode_id"][0]
 
         file_names = tf.repeat(file_name, traj_len)
@@ -301,6 +311,7 @@ def make_dataset_from_rlds(
             builder, split="all", shuffle=False, num_parallel_reads=num_parallel_reads
         ).traj_map(restructure, num_parallel_calls)
         # tries to load from cache, otherwise computes on the fly
+        # import pdb; pdb.set_trace()
         dataset_statistics = get_dataset_statistics(
             full_dataset,
             hash_dependencies=(
@@ -594,6 +605,7 @@ def make_interleaved_dataset(
 
     # Get Dataset Sizes
     dataset_sizes, all_dataset_statistics = [], {}
+   
     for dataset_kwargs in dataset_kwargs_list:
         data_kwargs = copy.deepcopy(dataset_kwargs)
         if "dataset_frame_transform_kwargs" in data_kwargs:

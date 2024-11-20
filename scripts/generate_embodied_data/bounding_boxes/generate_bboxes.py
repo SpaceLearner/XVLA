@@ -31,7 +31,11 @@ end = (args.id + 1) * split_percents
 
 # ds = tfds.load("bridge_orig", data_dir=args.data_path, split=f"train[{start}%:{end}%]")
 
+<<<<<<< HEAD
 dataset_builder = tfds.builder("libero_spatial_reasoning", data_dir="/Users/gj/Documents/Projects/Embodied_Critic/data")
+=======
+dataset_builder = tfds.builder("libero_spatial", data_dir="/home/admin/workspace/data")
+>>>>>>> refs/remotes/origin/main
 ds = dataset_builder.as_dataset(split=f"train[{start}%:{end}%]", shuffle_files=False)
 print("Done.")
 
@@ -50,27 +54,27 @@ model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id).to(device)
 print("Done.")
 
 BOX_THRESHOLD = 0.3
-TEXT_THRESHOLD = 0.2
+TEXT_THRESHOLD = 0.3
 
 bbox_results_json = {}
 for ep_idx, episode in enumerate(ds):
 
-    episode_id = episode["episode_metadata"]["episode_id"].numpy()
-    file_path = episode["episode_metadata"]["file_path"].numpy().decode()
+    episode_id = ep_idx + args.id * 18 # episode["episode_metadata"]["episode_id"].numpy()
+    file_path  = episode["episode_metadata"]["file_path"].numpy().decode()
     print(f"ID {args.id} starting ep: {episode_id}, {file_path}")
 
     if file_path not in bbox_results_json.keys():
         bbox_results_json[file_path] = {}
 
-    episode_json = results_json[file_path][str(episode_id)]
-    description = episode_json["caption"]
+    # episode_json = results_json[file_path][str(episode_id)]
+    description = "wooden cabinet, black bowl, plate, packet, drawer" # episode_json["caption"]
 
     start = time.time()
     bboxes_list = []
     for step_idx, step in enumerate(episode["steps"]):
         if step_idx == 0:
             lang_instruction = step["language_instruction"].numpy().decode()
-        image = Image.fromarray(step["observation"]["image_0"].numpy())
+        image = Image.fromarray(step["observation"]["image"].numpy())
         inputs = processor(
             images=image,
             text=post_process_caption(description, lang_instruction),
