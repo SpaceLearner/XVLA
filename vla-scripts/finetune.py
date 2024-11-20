@@ -23,25 +23,31 @@ import os
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 import draccus
 import torch
 import torch.distributed as dist
 import tqdm
-import wandb
 from accelerate import PartialState
 from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from transformers import AutoModelForVision2Seq, AutoProcessor, BitsAndBytesConfig
+from transformers import AutoConfig, AutoImageProcessor
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
+import wandb
 from prismatic.models.backbones.llm.prompting import PurePromptBuilder, VicunaV15ChatPromptBuilder
 from prismatic.util.data_utils import PaddedCollatorForActionPrediction
 from prismatic.vla.action_tokenizer import ActionTokenizer
 from prismatic.vla.datasets import RLDSBatchTransform, RLDSDataset
 from prismatic.vla.datasets.rlds.utils.data_utils import save_dataset_statistics
+
+from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
+from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
+from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
 
 # Sane Defaults
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -78,13 +84,16 @@ class FinetuneConfig:
     adapter_tmp_dir: Path = Path("adapter-tmp")                     # Temporary directory for LoRA weights before fusing
 
     # Fine-tuning Parameters
-    batch_size: int = 16                                            # Fine-tuning batch size
-    max_steps: int = 200_000                                        # Max number of fine-tuning steps
+    batch_size: int = 128                                          # Fine-tuning batch size
+    max_steps: int = 50_000                                        # Max number of fine-tuning steps
     save_steps: int = 5000                                          # Interval for checkpoint saving
-    learning_rate: float = 2e-5                                     # Fine-tuning learning rate
+    learning_rate: float = 5e-4                                     # Fine-tuning learning rate
     grad_accumulation_steps: int = 1                                # Gradient accumulation steps
     image_aug: bool = True                                          # Whether to train with image augmentations
     shuffle_buffer_size: int = 100_000                              # Dataloader shuffle buffer size (can reduce if OOM)
+    save_latest_checkpoint_only: bool = True                        # Whether to save only one checkpoint per run and
+                                                                    #   continually overwrite the latest checkpoint
+                                                                    #   (If False, saves all checkpoints)
 
     # LoRA Arguments
     use_lora: bool = True                                           # Whether to use LoRA fine-tuning
@@ -96,6 +105,7 @@ class FinetuneConfig:
     # Tracking Parameters
     wandb_project: str = "openvla"                                  # Name of W&B project to log to (use default!)
     wandb_entity: str = "stanford-voltron"                          # Name of entity to log under
+    run_id_note: Optional[str] = None                               # Extra note for logging, Weights & Biases
 
     # fmt: on
 
@@ -120,6 +130,10 @@ def finetune(cfg: FinetuneConfig) -> None:
         exp_id += f"+lora-r{cfg.lora_rank}+dropout-{cfg.lora_dropout}"
     if cfg.use_quantization:
         exp_id += "+q-4bit"
+    if cfg.run_id_note is not None:
+        exp_id += f"--{cfg.run_id_note}"
+    if cfg.image_aug:
+        exp_id += "--image_aug"
 
     # Start =>> Build Directories
     run_dir, adapter_dir = cfg.run_root_dir / exp_id, cfg.adapter_tmp_dir / exp_id
@@ -132,6 +146,12 @@ def finetune(cfg: FinetuneConfig) -> None:
         quantization_config = BitsAndBytesConfig(
             load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_quant_type="nf4"
         )
+
+    # Register OpenVLA model to HF Auto Classes (not needed if the model is on HF Hub)
+    AutoConfig.register("openvla", OpenVLAConfig)
+    AutoImageProcessor.register(OpenVLAConfig, PrismaticImageProcessor)
+    AutoProcessor.register(OpenVLAConfig, PrismaticProcessor)
+    AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
 
     # Load OpenVLA Processor and Model using HF AutoClasses
     processor = AutoProcessor.from_pretrained(cfg.vla_path, trust_remote_code=True)
@@ -192,11 +212,14 @@ def finetune(cfg: FinetuneConfig) -> None:
         image_transform=processor.image_processor.apply_transform,
         prompt_builder_fn=PurePromptBuilder if "v01" not in cfg.vla_path else VicunaV15ChatPromptBuilder,
     )
+    
+    print("here:************", tuple(vla.module.config.image_sizes))
+    
     vla_dataset = RLDSDataset(
         cfg.data_root_dir,
         cfg.dataset_name,
         batch_transform,
-        resize_resolution=tuple(vla.module.config.image_sizes),
+        resize_resolution=(tuple(vla.module.config.image_sizes)[0], 224),
         shuffle_buffer_size=cfg.shuffle_buffer_size,
         image_aug=cfg.image_aug,
     )
@@ -321,10 +344,32 @@ def finetune(cfg: FinetuneConfig) -> None:
                     merged_vla = PeftModel.from_pretrained(base_vla, adapter_dir)
                     merged_vla = merged_vla.merge_and_unload()
                     if distributed_state.is_main_process:
-                        merged_vla.save_pretrained(run_dir)
+                        if cfg.save_latest_checkpoint_only:
+                            # Overwrite latest checkpoint
+                            merged_vla.save_pretrained(run_dir)
+
+                            print(f"Saved Model Checkpoint for Step {gradient_step_idx} at: {run_dir}")
+                        else:
+                            # Prepare to save checkpoint in new directory
+                            checkpoint_dir = Path(str(run_dir) + f"--{gradient_step_idx}_chkpt")
+                            os.makedirs(checkpoint_dir, exist_ok=True)
+
+                            # Save dataset statistics to new directory
+                            save_dataset_statistics(vla_dataset.dataset_statistics, checkpoint_dir)
+
+                            # Save processor and model weights to new directory
+                            processor.save_pretrained(checkpoint_dir)
+                            merged_vla.save_pretrained(checkpoint_dir)
+
+                            print(f"Saved Model Checkpoint for Step {gradient_step_idx} at: {checkpoint_dir}")
 
                 # Block on Main Process Checkpointing
                 dist.barrier()
+
+            # Stop training when max_steps is reached
+            if gradient_step_idx == cfg.max_steps:
+                print(f"Max step {cfg.max_steps} reached! Stopping training...")
+                break
 
 
 if __name__ == "__main__":
