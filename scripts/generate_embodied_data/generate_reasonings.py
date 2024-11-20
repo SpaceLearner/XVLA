@@ -21,7 +21,7 @@ def main():
     dataset_builder = tfds.builder(dataset_name, data_dir=data_dir)
     
     # # 获取完整数据集以验证步骤数
-    ds = dataset_builder.as_dataset(split="train")
+    ds = dataset_builder.as_dataset(split="train", shuffle_files=False)
     # # 验证数据集中的步骤数
     # episode_steps = {}
     # for i in range(len(ds)):
