@@ -31,7 +31,11 @@ end = (args.id + 1) * split_percents
 
 # ds = tfds.load("bridge_orig", data_dir=args.data_path, split=f"train[{start}%:{end}%]")
 
+<<<<<<< HEAD
+dataset_builder = tfds.builder("libero_spatial_reasoning", data_dir="/Users/gj/Documents/Projects/Embodied_Critic/data")
+=======
 dataset_builder = tfds.builder("libero_spatial", data_dir="/home/admin/workspace/data")
+>>>>>>> refs/remotes/origin/main
 ds = dataset_builder.as_dataset(split=f"train[{start}%:{end}%]", shuffle_files=False)
 print("Done.")
 
