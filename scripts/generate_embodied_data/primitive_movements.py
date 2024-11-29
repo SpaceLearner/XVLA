@@ -87,3 +87,14 @@ def get_move_primitives(episode_id, builder):
     episode = next(iter(ds))
 
     return get_move_primitives_episode(episode)
+
+
+PRIMITIVE_MOVEMENTS = [
+    "向前移动",
+    "向后移动",
+    "向左移动",
+    "向右移动",
+    "跳跃",
+    "蹲下",
+    "停止"
+]
