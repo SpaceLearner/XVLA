@@ -150,6 +150,7 @@ def make_dataset_from_rlds(
     with open(reasoning_dataset_path, "r") as f:
         reasoning_dataset = json.load(f)
 
+
     def make_tf_dict(raw_dict):
         print("Building the reasoning dict...")
         
@@ -214,10 +215,6 @@ def make_dataset_from_rlds(
 
     reasoning_dataset = make_tf_dict(reasoning_dataset)
     
-    # import pdb; pdb.set_trace()
-    
-#     print(list(reasoning_dataset.keys())[0])
-    
 
     def restructure(traj):
         # apply a standardization function, if provided
@@ -277,6 +274,7 @@ def make_dataset_from_rlds(
         file_names = tf.repeat(file_name, traj_len)
         episode_ids = tf.as_string(tf.repeat(episode_id, traj_len))
         indices = tf.as_string(tf.range(traj_len))
+
         reasonings = reasoning_dataset.lookup(file_names + "_" + episode_ids + "_" + indices)
 
         traj = {
@@ -301,6 +299,14 @@ def make_dataset_from_rlds(
         return traj
 
     builder = tfds.builder(name, data_dir=data_dir)
+
+    ds = builder.as_dataset(
+            split="train[0:1]",
+            shuffle_files=False,
+            read_config=tfds.ReadConfig(try_autocache=False)
+        )
+
+    # print(next(iter(ds)))
 
     # load or compute dataset statistics
     if isinstance(dataset_statistics, str):
@@ -349,6 +355,8 @@ def make_dataset_from_rlds(
         ),
         num_parallel_calls,
     )
+
+    # print(next(iter(dataset)).keys())
 
     return dataset, dataset_statistics
 

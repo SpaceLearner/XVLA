@@ -29,10 +29,10 @@ from prismatic.vla.datasets.rlds.utils.data_utils import NormalizationType
 IGNORE_INDEX = -100
 
 
-def reasoning_dropout(reasoning: str, dropout_prob: float) -> Tuple[str, str]:
+def reasoning_dropout(reasoning: str, dropout_prob: float) -> Tuple[str, str, str]:
     """Dropout reasoning tokens with probability `dropout_prob`."""
     if len(reasoning) == 0:
-        return reasoning, ""
+        return reasoning, "", ""
 
     reasoning_parts = reasoning.split("@")
     tags = [(reasoning_parts[i], reasoning_parts[i + 1]) for i in range(0, len(reasoning_parts), 2)]
@@ -48,11 +48,17 @@ def reasoning_dropout(reasoning: str, dropout_prob: float) -> Tuple[str, str]:
     if "EXCLUDE_TAGS" in os.environ:
         excluded_tags = os.environ["EXCLUDE_TAGS"].split(",")
 
+    move_string = ""
+    for tag in tags:
+        if tag[0] == CotTag.MOVE.value:
+            move_string = tag[1]
+
     return (
         " ".join(
             [f"{tag[0]} {tag[1]}" for tag, is_taken in zip(tags, subset) if (is_taken and tag[0] not in excluded_tags)]
         ),
         subset_string,
+        move_string
     )
 
 
@@ -71,8 +77,13 @@ class RLDSBatchTransform:
         dataset_name, action = rlds_batch["dataset_name"], rlds_batch["action"][0]
         img = Image.fromarray(rlds_batch["observation"]["image_primary"][0])
         lang = rlds_batch["task"]["language_instruction"].decode().lower()
-        reasoning, subset = reasoning_dropout(rlds_batch["reasoning"].decode(), dropout_prob=self.reasoning_dropout_prob)
 
+
+        # move = reasoning.split("@")
+        # for i in range()
+        reasoning, subset, move_string = reasoning_dropout(rlds_batch["reasoning"].decode(), dropout_prob=self.reasoning_dropout_prob)
+        
+        
         # Construct Chat-based Prompt =>> Input is default query + language instruction, output are the action tokens
         prompt_builder = self.prompt_builder_fn("openvla")
 
@@ -80,7 +91,8 @@ class RLDSBatchTransform:
         conversation = [
             # {"from": "human", "value": f"What action should the robot take to {lang}? Explain why with {subset}."},
             {"from": "human", "value": f"What action should the robot take to {lang}?"},
-            {"from": "gpt", "value": f"{reasoning} {CotTag.ACTION.value} {self.action_tokenizer(action)}"},
+            # {"from": "gpt", "value": f"{reasoning} {CotTag.ACTION.value} {self.action_tokenizer(action)}"},
+            {"from": "gpt", "value": f"{CotTag.MOVE.value} {move_string} {CotTag.ACTION.value} {self.action_tokenizer(action)}"}
         ]
 
         for turn in conversation:
